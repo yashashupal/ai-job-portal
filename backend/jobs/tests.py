@@ -1,4 +1,3 @@
-import json
 from io import BytesIO
 from unittest.mock import MagicMock, patch
 
@@ -6,7 +5,6 @@ from docx import Document
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.cache import cache
 from django.test import override_settings
-from google.genai.errors import ServerError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.test import APITestCase
 
@@ -240,89 +238,6 @@ class ExternalTrackingTests(APITestCase):
 
 
 class GeminiMatchingTests(APITestCase):
-    def test_gemini_explanations_are_schema_constrained_and_attached(self):
-        from jobs.gemini import MATCH_RESPONSE_SCHEMA, _match_insights
-
-        cache.clear()
-        job = {"id": "job-123", "title": "React Engineer", "match_score": 84, "technologies": ["React"]}
-        client = MagicMock()
-        client.models.generate_content.return_value.text = json.dumps({
-            "summary": "Your frontend experience aligns with this role.",
-            "matches": [{
-                "external_id": "job-123",
-                "reason": "Your resume lists React, which is required for this role.",
-                "gaps": ["No testing framework is listed."],
-            }],
-        })
-
-        result = _match_insights(client, "React engineer with five years of experience.", [job])
-
-        config = client.models.generate_content.call_args.kwargs["config"]
-        self.assertIs(config.response_schema, MATCH_RESPONSE_SCHEMA)
-        self.assertEqual(result["summary"], "Your frontend experience aligns with this role.")
-        self.assertEqual(result["results"][0]["match_reason"], "Your resume lists React, which is required for this role.")
-        self.assertEqual(result["results"][0]["match_gaps"], ["No testing framework is listed."])
-
-    def test_gemini_server_failure_is_logged_safely_and_not_cached(self):
-        from jobs.gemini import _match_insights
-
-        cache.clear()
-        client = MagicMock()
-        client.models.generate_content.side_effect = ServerError(500, {"message": "private provider detail"})
-        client.interactions.create.side_effect = ServerError(503, {"message": "private fallback detail"})
-        ranked = [{"id": "job-500", "title": "Engineer", "match_score": 80}]
-        with self.assertLogs("jobs.gemini", level="WARNING") as captured, \
-             patch("jobs.gemini.cache.set") as cache_set:
-            result = _match_insights(client, "private resume content", ranked)
-
-        self.assertIn("type=ServerError, status=500", captured.output[0])
-        self.assertNotIn("private provider detail", captured.output[0])
-        self.assertNotIn("private resume content", captured.output[0])
-        self.assertNotIn("private fallback detail", " ".join(captured.output))
-        self.assertIn("temporarily unavailable", result["summary"])
-        cache_set.assert_not_called()
-
-    @override_settings(GEMINI_TEXT_MODEL="gemini-3.8-flash", GEMINI_TEXT_FALLBACK_MODEL="gemini-3.5-flash")
-    def test_gemini_retries_server_error_with_fallback_model(self):
-        from jobs.gemini import _match_insights
-
-        cache.clear()
-        client = MagicMock()
-        client.models.generate_content.side_effect = [
-            ServerError(500, {"message": "transient provider error"}),
-            MagicMock(text=json.dumps({
-                "summary": "Relevant full-stack experience.",
-                "matches": [{"external_id": "job-fallback", "reason": "Your React experience matches this role.", "gaps": []}],
-            })),
-        ]
-        result = _match_insights(client, "React developer resume", [{"id": "job-fallback", "title": "React developer", "match_score": 82}])
-
-        self.assertEqual([call.kwargs["model"] for call in client.models.generate_content.call_args_list], [
-            "gemini-3.8-flash", "gemini-3.5-flash",
-        ])
-        self.assertEqual(result["results"][0]["match_reason"], "Your React experience matches this role.")
-
-    @override_settings(GEMINI_TEXT_MODEL="gemini-3.8-flash", GEMINI_TEXT_FALLBACK_MODEL="gemini-3.5-flash")
-    def test_stateless_interactions_recover_match_explanation(self):
-        from jobs.gemini import _match_insights
-
-        cache.clear()
-        client = MagicMock()
-        client.models.generate_content.side_effect = [
-            ServerError(500, {"message": "temporary"}),
-            ServerError(503, {"message": "temporary"}),
-        ]
-        client.interactions.create.return_value.output_text = json.dumps({
-            "summary": "Your API experience aligns with this role.",
-            "matches": [{"external_id": "job-interaction", "reason": "Your Python API experience matches the requirements.", "gaps": ["Cloud experience is not listed."]}],
-        })
-
-        result = _match_insights(client, "Python API developer resume", [{"id": "job-interaction", "title": "Python API Developer", "match_score": 86}])
-
-        self.assertEqual(result["results"][0]["match_reason"], "Your Python API experience matches the requirements.")
-        self.assertEqual(result["results"][0]["match_gaps"], ["Cloud experience is not listed."])
-        self.assertFalse(client.interactions.create.call_args.kwargs["store"])
-
     @override_settings(GEMINI_API_KEY="test-key", GEMINI_EMBEDDING_MODEL="gemini-embedding-001", GEMINI_TEXT_MODEL="gemini-2.5-flash")
     @patch("jobs.gemini._client", return_value=object())
     @patch("jobs.gemini._match_insights", side_effect=lambda client, resume, jobs: {"summary": "Matches ranked.", "results": jobs})

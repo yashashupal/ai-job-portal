@@ -1,7 +1,6 @@
 """Resume-aware retrieval and grounded job-match explanations via Gemini."""
 import hashlib
 import json
-import logging
 import math
 
 from django.conf import settings
@@ -13,34 +12,6 @@ from .models import ExternalJobEmbedding
 
 EMBEDDING_DIMENSIONS = 768
 JOB_TEXT_LIMIT = 4000
-GEMINI_REQUEST_TIMEOUT_MS = 15000
-logger = logging.getLogger(__name__)
-
-MATCH_RESPONSE_SCHEMA = types.Schema(
-    type=types.Type.OBJECT,
-    additional_properties=False,
-    required=["summary", "matches"],
-    properties={
-        "summary": types.Schema(type=types.Type.STRING),
-        "matches": types.Schema(
-            type=types.Type.ARRAY,
-            items=types.Schema(
-                type=types.Type.OBJECT,
-                additional_properties=False,
-                required=["external_id", "reason", "gaps"],
-                properties={
-                    "external_id": types.Schema(type=types.Type.STRING),
-                    "reason": types.Schema(type=types.Type.STRING),
-                    "gaps": types.Schema(
-                        type=types.Type.ARRAY,
-                        items=types.Schema(type=types.Type.STRING),
-                        max_items=3,
-                    ),
-                },
-            ),
-        ),
-    },
-)
 
 
 class GeminiError(Exception):
@@ -50,10 +21,7 @@ class GeminiError(Exception):
 def _client():
     if not settings.GEMINI_API_KEY:
         raise GeminiError("Resume matching is not configured. Add GEMINI_API_KEY to the server environment.")
-    return genai.Client(
-        api_key=settings.GEMINI_API_KEY,
-        http_options=types.HttpOptions(timeout=GEMINI_REQUEST_TIMEOUT_MS),
-    )
+    return genai.Client(api_key=settings.GEMINI_API_KEY)
 
 
 def _embed(client, texts, task_type):
@@ -106,73 +74,6 @@ def _fallback_insight(job, score):
     return f"Semantic resume match: {score}%.{evidence}", []
 
 
-def _generate_match_notes(client, prompt):
-    models = list(dict.fromkeys((settings.GEMINI_TEXT_MODEL, settings.GEMINI_TEXT_FALLBACK_MODEL)))
-    for index, model in enumerate(models):
-        try:
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=MATCH_RESPONSE_SCHEMA,
-                    max_output_tokens=1400,
-                ),
-            )
-            return response.text or ""
-        except Exception as exc:
-            status_code = getattr(exc, "code", None)
-            logger.warning(
-                "Gemini match-note request failed (model=%s, type=%s, status=%s).",
-                model,
-                type(exc).__name__,
-                status_code,
-            )
-            if index + 1 == len(models) or not isinstance(status_code, int) or status_code < 500:
-                break
-
-    try:
-        interaction = client.interactions.create(
-            model=settings.GEMINI_TEXT_MODEL,
-            input=prompt,
-            store=False,
-            timeout=GEMINI_REQUEST_TIMEOUT_MS,
-            response_format={
-                "type": "text",
-                "mime_type": "application/json",
-                "schema": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["summary", "matches"],
-                    "properties": {
-                        "summary": {"type": "string"},
-                        "matches": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "additionalProperties": False,
-                                "required": ["external_id", "reason", "gaps"],
-                                "properties": {
-                                    "external_id": {"type": "string"},
-                                    "reason": {"type": "string"},
-                                    "gaps": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
-                                },
-                            },
-                        },
-                    },
-                },
-            },
-        )
-        return interaction.output_text or ""
-    except Exception as exc:
-        logger.warning(
-            "Gemini stateless explanation fallback failed (type=%s, status=%s).",
-            type(exc).__name__,
-            getattr(exc, "code", None),
-        )
-        return None
-
-
 def _match_insights(client, resume_text, ranked):
     cache_material = json.dumps(
         [(job["id"], job["match_score"]) for job in ranked], separators=(",", ":"),
@@ -199,11 +100,17 @@ def _match_insights(client, resume_text, ranked):
         "Keep each reason under 35 words and list at most 3 concrete missing requirements; use an empty gaps list when none are stated. "
         f"RESUME:\n{resume_text[:7000]}\nJOBS:\n{json.dumps(payload, ensure_ascii=True)}"
     )
-    raw = _generate_match_notes(client, prompt)
-
-    generated = False
-    if raw:
-        raw = raw.strip()
+    try:
+        response = client.models.generate_content(
+            model=settings.GEMINI_TEXT_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+                max_output_tokens=1400,
+            ),
+        )
+        raw = (response.text or "").strip()
         if raw.startswith("```"):
             lines = raw.splitlines()
             if lines and lines[0].strip().lower() in ("```", "```json"):
@@ -211,28 +118,20 @@ def _match_insights(client, resume_text, ranked):
             if lines and lines[-1].strip() == "```":
                 lines = lines[:-1]
             raw = "\n".join(lines).strip()
-        try:
-            parsed = json.loads(raw)
-            if not isinstance(parsed, dict) or not isinstance(parsed.get("matches"), list):
-                raise ValueError("Invalid match response shape")
-            allowed_ids = {job["id"] for job in ranked}
-            insights = {
-                item["external_id"]: {
-                    "reason": str(item.get("reason", ""))[:300],
-                    "gaps": [str(gap)[:100] for gap in item.get("gaps", [])[:3]],
-                }
-                for item in parsed["matches"]
-                if isinstance(item, dict) and item.get("external_id") in allowed_ids
+        parsed = json.loads(raw)
+        allowed_ids = {job["id"] for job in ranked}
+        insights = {
+            item["external_id"]: {
+                "reason": str(item.get("reason", ""))[:300],
+                "gaps": [str(gap)[:100] for gap in item.get("gaps", [])[:3]],
             }
-            summary = str(parsed.get("summary", ""))[:500]
-            generated = bool(insights)
-        except (json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
-            logger.warning("Gemini match-note response was invalid (%s).", type(exc).__name__)
-            insights = {}
-            summary = "Gemini returned an invalid explanation; jobs are still ranked by resume similarity."
-    else:
+            for item in parsed.get("matches", [])
+            if isinstance(item, dict) and item.get("external_id") in allowed_ids
+        }
+        summary = str(parsed.get("summary", ""))[:500]
+    except Exception:
         insights = {}
-        summary = "Jobs are ranked by semantic similarity to your resume. AI explanations are temporarily unavailable."
+        summary = "Jobs are ranked by semantic similarity to your resume. Review each listing before applying."
 
     for job in ranked:
         fallback_reason, fallback_gaps = _fallback_insight(job, job["match_score"])
@@ -240,8 +139,7 @@ def _match_insights(client, resume_text, ranked):
         job["match_reason"] = insight.get("reason") or fallback_reason
         job["match_gaps"] = insight.get("gaps", fallback_gaps)
     result = {"summary": summary, "results": ranked}
-    if generated:
-        cache.set(key, result, 60 * 60)
+    cache.set(key, result, 60 * 60)
     return result
 
 
