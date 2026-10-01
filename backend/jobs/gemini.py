@@ -100,6 +100,33 @@ def _fallback_insight(job, score):
     return f"Semantic resume match: {score}%.{evidence}", []
 
 
+def _generate_match_notes(client, prompt):
+    models = list(dict.fromkeys((settings.GEMINI_TEXT_MODEL, settings.GEMINI_TEXT_FALLBACK_MODEL)))
+    for index, model in enumerate(models):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=MATCH_RESPONSE_SCHEMA,
+                    max_output_tokens=1400,
+                ),
+            )
+            return response
+        except Exception as exc:
+            status_code = getattr(exc, "code", None)
+            logger.warning(
+                "Gemini match-note request failed (model=%s, type=%s, status=%s).",
+                model,
+                type(exc).__name__,
+                status_code,
+            )
+            if index + 1 == len(models) or not isinstance(status_code, int) or status_code < 500:
+                return None
+    return None
+
+
 def _match_insights(client, resume_text, ranked):
     cache_material = json.dumps(
         [(job["id"], job["match_score"]) for job in ranked], separators=(",", ":"),
@@ -126,20 +153,9 @@ def _match_insights(client, resume_text, ranked):
         "Keep each reason under 35 words and list at most 3 concrete missing requirements; use an empty gaps list when none are stated. "
         f"RESUME:\n{resume_text[:7000]}\nJOBS:\n{json.dumps(payload, ensure_ascii=True)}"
     )
-    try:
-        response = client.models.generate_content(
-            model=settings.GEMINI_TEXT_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=MATCH_RESPONSE_SCHEMA,
-                max_output_tokens=1400,
-            ),
-        )
-    except Exception as exc:
-        logger.warning("Gemini match-note request failed (%s).", type(exc).__name__)
-        response = None
+    response = _generate_match_notes(client, prompt)
 
+    generated = False
     if response is not None:
         raw = (response.text or "").strip()
         if raw.startswith("```"):
@@ -163,10 +179,11 @@ def _match_insights(client, resume_text, ranked):
                 if isinstance(item, dict) and item.get("external_id") in allowed_ids
             }
             summary = str(parsed.get("summary", ""))[:500]
+            generated = bool(insights)
         except (json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
             logger.warning("Gemini match-note response was invalid (%s).", type(exc).__name__)
             insights = {}
-            summary = "Jobs are ranked by semantic similarity to your resume. Review each listing before applying."
+            summary = "Gemini returned an invalid explanation; jobs are still ranked by resume similarity."
     else:
         insights = {}
         summary = "Jobs are ranked by semantic similarity to your resume. AI explanations are temporarily unavailable."
@@ -177,7 +194,8 @@ def _match_insights(client, resume_text, ranked):
         job["match_reason"] = insight.get("reason") or fallback_reason
         job["match_gaps"] = insight.get("gaps", fallback_gaps)
     result = {"summary": summary, "results": ranked}
-    cache.set(key, result, 60 * 60)
+    if generated:
+        cache.set(key, result, 60 * 60)
     return result
 
 

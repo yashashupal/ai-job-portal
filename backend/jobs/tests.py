@@ -6,6 +6,7 @@ from docx import Document
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.cache import cache
 from django.test import override_settings
+from google.genai.errors import ServerError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.test import APITestCase
 
@@ -261,6 +262,43 @@ class GeminiMatchingTests(APITestCase):
         self.assertEqual(result["summary"], "Your frontend experience aligns with this role.")
         self.assertEqual(result["results"][0]["match_reason"], "Your resume lists React, which is required for this role.")
         self.assertEqual(result["results"][0]["match_gaps"], ["No testing framework is listed."])
+
+    def test_gemini_server_failure_is_logged_safely_and_not_cached(self):
+        from jobs.gemini import _match_insights
+
+        cache.clear()
+        client = MagicMock()
+        client.models.generate_content.side_effect = ServerError(500, {"message": "private provider detail"})
+        ranked = [{"id": "job-500", "title": "Engineer", "match_score": 80}]
+        with self.assertLogs("jobs.gemini", level="WARNING") as captured, \
+             patch("jobs.gemini.cache.set") as cache_set:
+            result = _match_insights(client, "private resume content", ranked)
+
+        self.assertIn("type=ServerError, status=500", captured.output[0])
+        self.assertNotIn("private provider detail", captured.output[0])
+        self.assertNotIn("private resume content", captured.output[0])
+        self.assertIn("temporarily unavailable", result["summary"])
+        cache_set.assert_not_called()
+
+    @override_settings(GEMINI_TEXT_MODEL="gemini-3.8-flash", GEMINI_TEXT_FALLBACK_MODEL="gemini-3.5-flash")
+    def test_gemini_retries_server_error_with_fallback_model(self):
+        from jobs.gemini import _match_insights
+
+        cache.clear()
+        client = MagicMock()
+        client.models.generate_content.side_effect = [
+            ServerError(500, {"message": "transient provider error"}),
+            MagicMock(text=json.dumps({
+                "summary": "Relevant full-stack experience.",
+                "matches": [{"external_id": "job-fallback", "reason": "Your React experience matches this role.", "gaps": []}],
+            })),
+        ]
+        result = _match_insights(client, "React developer resume", [{"id": "job-fallback", "title": "React developer", "match_score": 82}])
+
+        self.assertEqual([call.kwargs["model"] for call in client.models.generate_content.call_args_list], [
+            "gemini-3.8-flash", "gemini-3.5-flash",
+        ])
+        self.assertEqual(result["results"][0]["match_reason"], "Your React experience matches this role.")
 
     @override_settings(GEMINI_API_KEY="test-key", GEMINI_EMBEDDING_MODEL="gemini-embedding-001", GEMINI_TEXT_MODEL="gemini-2.5-flash")
     @patch("jobs.gemini._client", return_value=object())
