@@ -1,9 +1,14 @@
+from io import BytesIO
 from unittest.mock import MagicMock, patch
 
+from docx import Document
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.cache import cache
 from django.test import override_settings
 from rest_framework.test import APITestCase
+
+from accounts.models import User
+from jobs.models import ExternalJobEmbedding
 
 
 def register(client, email, role, **extra):
@@ -134,3 +139,98 @@ class ExternalTests(APITestCase):
     def test_bad_key(self, post):
         post.return_value = MagicMock(ok=False, status_code=401)
         self.assertEqual(self.client.get("/api/external/jobs/").status_code, 502)
+
+
+class ApplicantProfileTests(APITestCase):
+    def test_profile_edit_and_private_resume_lifecycle(self):
+        token = register(self.client, "profile@example.com", "applicant")
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+        updated = self.client.patch("/api/auth/me/", {"headline": "Backend engineer", "first_name": "Asha"}, format="json")
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.data["headline"], "Backend engineer")
+
+        document = Document()
+        document.add_paragraph("Python Django PostgreSQL REST API engineer with production experience. " * 8)
+        buffer = BytesIO()
+        document.save(buffer)
+        upload = SimpleUploadedFile("asha-resume.docx", buffer.getvalue(), content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        response = self.client.post("/api/auth/me/resume/", {"resume": upload}, format="multipart")
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertTrue(response.data["has_resume"])
+
+        user = User.objects.get(email="profile@example.com")
+        self.assertIn("Django", user.resume_text)
+        self.assertEqual(user.resume_embedding, [])
+        downloaded = self.client.get("/api/auth/me/resume/")
+        self.assertEqual(downloaded.status_code, 200)
+        self.assertEqual(downloaded.content, bytes(user.resume_data))
+        self.assertEqual(self.client.delete("/api/auth/me/resume/").status_code, 204)
+        user.refresh_from_db()
+        self.assertIsNone(user.resume_data)
+        self.assertEqual(user.resume_text, "")
+
+    def test_resume_endpoint_requires_authentication(self):
+        self.assertEqual(self.client.get("/api/auth/me/resume/").status_code, 401)
+
+
+class ExternalTrackingTests(APITestCase):
+    def test_saved_live_jobs_are_persistent_and_private_to_the_owner(self):
+        token = register(self.client, "tracker@example.com", "applicant")
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+        job = {"title": "Python Engineer", "company": "Acme", "apply_url": "https://jobs.example.com/1", "technologies": ["Python"]}
+        created = self.client.post("/api/external/tracked/", {"external_id": "source-1", "job": job}, format="json")
+        self.assertEqual(created.status_code, 200, created.content)
+        self.assertEqual(created.data["status"], "saved")
+        self.assertEqual(len(self.client.get("/api/external/tracked/").data), 1)
+
+        updated = self.client.patch(f"/api/external/tracked/{created.data['id']}/", {"status": "applied"}, format="json")
+        self.assertEqual(updated.data["status"], "applied")
+
+        other = register(self.client, "other-tracker@example.com", "applicant")
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {other}")
+        self.assertEqual(self.client.patch(f"/api/external/tracked/{created.data['id']}/", {"status": "saved"}, format="json").status_code, 404)
+        self.assertEqual(self.client.delete(f"/api/external/tracked/{created.data['id']}/").status_code, 404)
+
+    def test_invalid_external_apply_urls_are_rejected(self):
+        token = register(self.client, "url-check@example.com", "applicant")
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+        response = self.client.post("/api/external/tracked/", {
+            "external_id": "source-2", "job": {"title": "Python Engineer", "apply_url": "javascript:alert(1)"},
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+
+
+class GeminiMatchingTests(APITestCase):
+    @override_settings(GEMINI_API_KEY="test-key", GEMINI_EMBEDDING_MODEL="gemini-embedding-001", GEMINI_TEXT_MODEL="gemini-2.5-flash")
+    @patch("jobs.gemini._client", return_value=object())
+    @patch("jobs.gemini._match_insights", side_effect=lambda client, resume, jobs: {"summary": "Matches ranked.", "results": jobs})
+    @patch("jobs.gemini._embed", side_effect=[[[1.0, 0.0]], [[0.0, 1.0], [1.0, 0.0]]])
+    def test_resume_and_job_embeddings_rank_and_persist(self, embed, insights, client):
+        from jobs.gemini import rank_external_jobs
+
+        user = User.objects.create_user(username="match@example.com", email="match@example.com", password="StrongPass123")
+        user.resume_text = "Python Django backend engineer with PostgreSQL and REST experience." * 4
+        user.save(update_fields=("resume_text",))
+        jobs = [
+            {"id": "one", "title": "Frontend Artist", "technologies": ["CSS"]},
+            {"id": "two", "title": "Python Engineer", "technologies": ["Django"]},
+        ]
+
+        result = rank_external_jobs(user, jobs)
+        self.assertEqual([job["id"] for job in result["results"]], ["two", "one"])
+        self.assertEqual(result["results"][0]["match_score"], 100)
+        self.assertEqual(ExternalJobEmbedding.objects.count(), 2)
+        self.assertTrue(User.objects.get(pk=user.pk).resume_embedding)
+
+        rank_external_jobs(User.objects.get(pk=user.pk), jobs)
+        self.assertEqual(embed.call_count, 2)
+
+    @patch("jobs.views.jobspipe.search_jobs")
+    def test_recommendations_do_not_consume_search_without_a_resume(self, search):
+        token = register(self.client, "no-resume@example.com", "applicant")
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+        response = self.client.get("/api/external/jobs/recommended/")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Upload your resume", response.data["detail"])
+        search.assert_not_called()

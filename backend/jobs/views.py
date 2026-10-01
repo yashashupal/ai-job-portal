@@ -1,6 +1,7 @@
 import os
 
 from django.db.models import Count, Q
+from django.conf import settings
 from django.http import Http404, HttpResponse
 from rest_framework import generics, status, viewsets
 from rest_framework.decorators import action
@@ -10,12 +11,12 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
-from . import jobspipe
-from .models import Application, Job
+from . import gemini, jobspipe
+from .models import Application, ExternalJobTracking, Job
 from .permissions import IsApplicant, IsHirer
 from .serializers import (
     ApplicationStatusSerializer, ApplyInputSerializer, JobApplicationSerializer,
-    JobSerializer, MyApplicationSerializer,
+    ExternalJobTrackingSerializer, JobSerializer, MyApplicationSerializer,
 )
 
 
@@ -150,7 +151,91 @@ class ExternalJobsView(_ExternalView):
             )
         except jobspipe.JobsPipeError as e:
             return Response({"detail": e.message}, status=e.status)
+        if request.user.is_authenticated and getattr(request.user, "role", None) == "applicant":
+            ids = [job["id"] for job in data["results"]]
+            tracked = {
+                record.external_id: record
+                for record in ExternalJobTracking.objects.filter(applicant=request.user, external_id__in=ids)
+            }
+            for job in data["results"]:
+                record = tracked.get(job["id"])
+                job["tracked_status"] = record.status if record else ""
+                job["tracked_id"] = record.id if record else None
         return Response(data)
+
+
+class RecommendedExternalJobsView(_ExternalView):
+    permission_classes = [IsAuthenticated, IsApplicant]
+
+    def get(self, request):
+        params = request.query_params
+        if not request.user.resume_text:
+            return Response({"detail": "Upload your resume in Profile before finding matches."}, status=status.HTTP_400_BAD_REQUEST)
+        if not settings.GEMINI_API_KEY:
+            return Response({"detail": "Resume matching is not configured. Add GEMINI_API_KEY to the server environment."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        try:
+            jobs = jobspipe.search_jobs(
+                q=params.get("q", "").strip()[:100],
+                location=params.get("location", "").strip()[:100],
+                country=params.get("country", "").strip()[:2],
+                remote=params.get("remote") in ("1", "true", "True"),
+                cursor=params.get("cursor", ""),
+                limit=params.get("limit", 20),
+            )
+            ranked = gemini.rank_external_jobs(request.user, jobs["results"])
+        except jobspipe.JobsPipeError as exc:
+            return Response({"detail": exc.message}, status=exc.status)
+        except gemini.GeminiError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except (TypeError, ValueError):
+            return Response({"detail": "Invalid job search filters."}, status=status.HTTP_400_BAD_REQUEST)
+
+        ids = [job["id"] for job in ranked["results"]]
+        tracked = {
+            record.external_id: record
+            for record in ExternalJobTracking.objects.filter(applicant=request.user, external_id__in=ids)
+        }
+        for job in ranked["results"]:
+            record = tracked.get(job["id"])
+            job["tracked_status"] = record.status if record else ""
+            job["tracked_id"] = record.id if record else None
+        return Response({**jobs, **ranked})
+
+
+class ExternalTrackedJobsView(APIView):
+    permission_classes = [IsAuthenticated, IsApplicant]
+
+    def get(self, request):
+        records = ExternalJobTracking.objects.filter(applicant=request.user)
+        return Response(ExternalJobTrackingSerializer(records, many=True).data)
+
+    def post(self, request):
+        serializer = ExternalJobTrackingSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        values = serializer.validated_data
+        record, _ = ExternalJobTracking.objects.update_or_create(
+            applicant=request.user,
+            external_id=values["external_id"],
+            defaults={"job_payload": values["job_payload"], "status": values.get("status", "saved")},
+        )
+        return Response(ExternalJobTrackingSerializer(record).data, status=status.HTTP_200_OK)
+
+
+class ExternalTrackedJobDetailView(APIView):
+    permission_classes = [IsAuthenticated, IsApplicant]
+
+    def patch(self, request, pk):
+        record = generics.get_object_or_404(ExternalJobTracking, pk=pk, applicant=request.user)
+        serializer = ExternalJobTrackingSerializer(record, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        record.status = serializer.validated_data.get("status", record.status)
+        record.save(update_fields=("status", "updated_at"))
+        return Response(ExternalJobTrackingSerializer(record).data)
+
+    def delete(self, request, pk):
+        record = generics.get_object_or_404(ExternalJobTracking, pk=pk, applicant=request.user)
+        record.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class StackScanView(_ExternalView):

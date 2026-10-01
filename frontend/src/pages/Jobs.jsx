@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import api, { errorText } from "../api";
 import ExternalJobCard from "../components/ExternalJobCard.jsx";
+import { Link } from "react-router-dom";
+import { useAuth } from "../auth.jsx";
 
 const COUNTRIES = [
   ["", "Any country"], ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"],
@@ -16,10 +18,12 @@ function Skeletons() {
 }
 
 export default function Jobs() {
+  const { user } = useAuth();
   const [form, setForm] = useState({ q: "", location: "" });
   const [applied, setApplied] = useState({ q: "", location: "" });
   const [filters, setFilters] = useState({ remote: false, country: "" });
-  const [data, setData] = useState({ items: [], count: 0, hasNext: false, cursor: null, sandbox: false });
+  const [forYou, setForYou] = useState(false);
+  const [data, setData] = useState({ items: [], count: 0, hasNext: false, cursor: null, sandbox: false, summary: "" });
   const [status, setStatus] = useState({ loading: true, loadingMore: false, error: "" });
 
   const loadLive = useCallback(async (cursor = "") => {
@@ -29,16 +33,18 @@ export default function Jobs() {
         q: applied.q, location: applied.location, country: filters.country,
         remote: filters.remote ? 1 : "", cursor,
       };
-      const { data: res } = await api.get("/external/jobs/", { params });
+      const endpoint = forYou ? "/external/jobs/recommended/" : "/external/jobs/";
+      const { data: res } = await api.get(endpoint, { params });
       setData((d) => ({
         items: cursor ? [...d.items, ...res.results] : res.results,
         count: res.total ?? 0, hasNext: !!res.next_cursor, cursor: res.next_cursor, sandbox: res.sandbox,
+        summary: res.summary || "",
       }));
       setStatus({ loading: false, loadingMore: false, error: "" });
     } catch (err) {
       setStatus({ loading: false, loadingMore: false, error: errorText(err) });
     }
-  }, [applied, filters.country, filters.remote]);
+  }, [applied, filters.country, filters.remote, forYou]);
 
   useEffect(() => {
     loadLive("");
@@ -51,11 +57,21 @@ export default function Jobs() {
   const setFilter = (key, value) => {
     setFilters((f) => ({ ...f, [key]: value }));
   };
+  const switchMode = (next) => {
+    setData({ items: [], count: 0, hasNext: false, cursor: null, sandbox: false, summary: "" });
+    setForYou(next);
+  };
+  let marketMessage = "Live listings from other job boards. “Apply” opens the original posting.";
+  if (data.sandbox) marketMessage = "Showing sample data because no JobsPipe key is set on the server.";
+  if (forYou && data.summary) marketMessage = data.summary;
+  const showEmpty = !status.loading && data.items.length === 0 && !status.error;
+  const showResults = !status.loading && data.items.length > 0;
+
   return (
     <div className="container">
       <section className="hero">
         <h1>Find work worth applying for</h1>
-        <p>Browse roles posted directly on Tulsa Web Solution, or search live openings collected from 30+ job boards.</p>
+        <p>Browse live openings or rank them against your resume to find a closer fit.</p>
         <form className="searchbar" onSubmit={submit} role="search">
           <div className="cell">
             <label htmlFor="q">Role or keyword</label>
@@ -72,11 +88,16 @@ export default function Jobs() {
       </section>
 
       <div className="row between wrap">
-        {!status.loading && !status.error && (
-          <span className="muted small">
-            {data.count ? `${data.count.toLocaleString()} matching roles` : `${data.items.length} roles shown`}
-          </span>
-        )}
+        <div className="row wrap">
+          {user?.role === "applicant" && (
+            <div className="segmented" aria-label="Job recommendations">
+              <button aria-pressed={!forYou} onClick={() => switchMode(false)}>All listings</button>
+              <button aria-pressed={forYou} onClick={() => switchMode(true)}>For you</button>
+            </div>
+          )}
+          {!user && <Link className="btn btn-outline btn-sm" to="/login">Log in for resume matches</Link>}
+          {!status.loading && !status.error && <span className="muted small">{data.count ? `${data.count.toLocaleString()} matching roles` : `${data.items.length} roles shown`}</span>}
+        </div>
       </div>
 
       <div className="layout">
@@ -91,7 +112,7 @@ export default function Jobs() {
             <div className="group">
               <label className="check">
                 <input type="checkbox" checked={filters.remote} onChange={(e) => setFilter("remote", e.target.checked)} />
-                Remote only
+                <span>Remote only</span>
               </label>
             </div>
           </div>
@@ -99,19 +120,14 @@ export default function Jobs() {
 
         <section aria-live="polite">
           <div className="alert alert-info" style={{ marginBottom: 14 }}>
-            {data.sandbox
-              ? "Showing sample data because no JobsPipe key is set on the server."
-              : "Live listings from other job boards. “Apply” opens the original posting."}
+            {marketMessage}
           </div>
-          {status.error && <div className="alert alert-error">{status.error}</div>}
-          {status.loading ? (
-            <Skeletons />
-          ) : data.items.length === 0 && !status.error ? (
-            <div className="empty">
-              <h3>No roles match your search</h3>
-              <p>Try a broader keyword, or clear a filter.</p>
-            </div>
-          ) : (
+          {status.error && <div className="alert alert-error">{status.error}{forYou && status.error.toLowerCase().includes("upload your resume") && <> <Link to="/profile">Upload your resume in Profile</Link></>}</div>}
+          {status.loading && <Skeletons />}
+          {showEmpty && (
+            <div className="empty"><h3>No roles match your search</h3><p>Try a broader keyword, or clear a filter.</p></div>
+          )}
+          {showResults && (
             <div className="cards">
               {data.items.map((job) => <ExternalJobCard key={job.id} job={job} />)}
             </div>

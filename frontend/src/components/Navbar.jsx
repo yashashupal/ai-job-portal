@@ -17,6 +17,7 @@ export default function Navbar() {
           <NavLink to="/" end>Find jobs</NavLink>
           {user?.role === "applicant" && <NavLink to="/applications">My applications</NavLink>}
           {user?.role === "hirer" && <NavLink to="/hirer">My jobs</NavLink>}
+          {user && <NavLink to="/profile">Profile</NavLink>}
         </nav>
         <div className="nav-user">
           {user ? (

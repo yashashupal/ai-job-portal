@@ -1,12 +1,16 @@
 from django.contrib.auth import authenticate
+from django.http import HttpResponse
+from django.utils import timezone
 from rest_framework import generics, status
-from rest_framework.permissions import AllowAny
+from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from .models import User
-from .serializers import LoginSerializer, RegisterSerializer, UserSerializer
+from .resumes import ResumeTextError, extract_resume_text
+from .serializers import LoginSerializer, RegisterSerializer, ResumeUploadSerializer, UserSerializer
 
 
 def auth_payload(user):
@@ -48,3 +52,55 @@ class MeView(generics.RetrieveUpdateAPIView):
 
     def get_object(self):
         return self.request.user
+
+
+class ResumeView(APIView):
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        serializer = ResumeUploadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        resume = serializer.validated_data["resume"]
+        data = resume.read()
+        try:
+            text = extract_resume_text(data, resume.name)
+        except ResumeTextError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        user = request.user
+        user.resume_name = resume.name[:200]
+        user.resume_type = resume.content_type or "application/octet-stream"
+        user.resume_data = data
+        user.resume_text = text
+        user.resume_embedding = []
+        user.resume_embedding_model = ""
+        user.resume_uploaded_at = timezone.now()
+        user.save(update_fields=(
+            "resume_name", "resume_type", "resume_data", "resume_text", "resume_embedding",
+            "resume_embedding_model", "resume_uploaded_at",
+        ))
+        return Response(UserSerializer(user).data)
+
+    def get(self, request):
+        user = request.user
+        if not user.resume_data:
+            return Response({"detail": "No resume has been uploaded."}, status=status.HTTP_404_NOT_FOUND)
+        response = HttpResponse(bytes(user.resume_data), content_type=user.resume_type or "application/octet-stream")
+        response["Content-Disposition"] = f'attachment; filename="{user.resume_name}"'
+        response["X-Content-Type-Options"] = "nosniff"
+        return response
+
+    def delete(self, request):
+        user = request.user
+        user.resume_name = ""
+        user.resume_type = ""
+        user.resume_data = None
+        user.resume_text = ""
+        user.resume_embedding = []
+        user.resume_embedding_model = ""
+        user.resume_uploaded_at = None
+        user.save(update_fields=(
+            "resume_name", "resume_type", "resume_data", "resume_text", "resume_embedding",
+            "resume_embedding_model", "resume_uploaded_at",
+        ))
+        return Response(status=status.HTTP_204_NO_CONTENT)

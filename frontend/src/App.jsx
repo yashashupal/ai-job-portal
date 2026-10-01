@@ -10,6 +10,7 @@ import PostJob from "./pages/PostJob.jsx";
 import HirerDashboard from "./pages/HirerDashboard.jsx";
 import Applicants from "./pages/Applicants.jsx";
 import MyApplications from "./pages/MyApplications.jsx";
+import Profile from "./pages/Profile.jsx";
 
 function Protected({ role, children }) {
   const { user } = useAuth();
@@ -38,6 +39,7 @@ export default function App() {
           <Route path="/jobs/:id" element={<JobDetail />} />
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
+          <Route path="/profile" element={<Protected><Profile /></Protected>} />
           <Route path="/applications" element={<Protected role="applicant"><MyApplications /></Protected>} />
           <Route path="/hirer" element={<Protected role="hirer"><HirerDashboard /></Protected>} />
           <Route path="/hirer/jobs/new" element={<Protected role="hirer"><PostJob /></Protected>} />

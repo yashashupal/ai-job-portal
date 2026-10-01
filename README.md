@@ -28,6 +28,13 @@ Open http://localhost:5173
 Demo hirer: `demo-hirer@example.com` / `DemoPass123` (created by `seed_demo`).
 Register a new account from the UI to try the applicant side.
 
+Applicants can edit their profile and upload a PDF or DOCX resume from **Profile**.
+The **For you** job mode uses Gemini embeddings to rank live listings against the
+resume, then asks Gemini for evidence-based match notes. Resume originals and
+extracted text are stored on the backend; extracted text is sent to Gemini only
+when matching is requested. External listings can be saved and tracked from
+**My applications**.
+
 ## Check the JobsPipe connection (uses 1 credit)
 
 ```bash
@@ -64,7 +71,7 @@ Tests: `cd backend && python manage.py test`
 ## Deploy
 
 1. **Backend on Render** – New > Blueprint > pick this repo (it reads `render.yaml`).
-   Fill `JOBSPIPE_API_KEY` and `CORS_ALLOWED_ORIGINS` (temporarily `http://localhost:5173`).
+   Fill `JOBSPIPE_API_KEY`, `GEMINI_API_KEY`, and `CORS_ALLOWED_ORIGINS` (temporarily `http://localhost:5173`).
 2. **Frontend on Vercel** – Import the repo, set **Root Directory = `frontend`**, add env var
    `VITE_API_URL=https://<your-render-service>.onrender.com`, deploy.
 3. Back on Render, set `CORS_ALLOWED_ORIGINS=https://<your-app>.vercel.app` (no trailing slash) and redeploy.
