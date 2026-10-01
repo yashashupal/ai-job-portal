@@ -79,6 +79,7 @@ p { margin: 0; }
 .btn-danger:hover:not(:disabled) { background: var(--bad-soft); }
 .btn-sm { padding: 7px 12px; font-size: 13px; }
 .btn-block { width: 100%; }
+.btn-icon { width: 36px; height: 36px; padding: 0; }
 
 /* forms */
 label { display: block; font-weight: 600; font-size: 14px; margin-bottom: 6px; }
@@ -182,8 +183,13 @@ input[type="file"] { font: inherit; width: 100%; padding: 9px; border: 1px dashe
 }
 @media (max-width: 640px) {
   .container { padding: 0 16px; }
-  .nav .container { gap: 12px; }
-  .nav-user .hide-sm { display: none; }
+  .nav .container { height: auto; min-height: 64px; gap: 4px 10px; padding-top: 8px; padding-bottom: 8px; flex-wrap: wrap; }
+  .logo { font-size: 16px; gap: 6px; }
+  .nav-links { order: 3; flex: 0 0 100%; gap: 2px; }
+  .nav-links a { padding: 6px 8px; font-size: 13px; }
+  .nav-user { margin-left: auto; gap: 6px; }
+  .nav-user .avatar { display: none; }
+  .nav-user .btn-sm { padding: 6px 9px; }
   .searchbar { flex-direction: column; }
   .searchbar .cell + .cell { border-left: 0; border-top: 1px solid var(--line); padding-top: 8px; }
   .field-row { grid-template-columns: 1fr; }

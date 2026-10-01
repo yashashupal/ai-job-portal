@@ -1,4 +1,5 @@
 import { Link, NavLink, useNavigate } from "react-router-dom";
+import { UserRound } from "lucide-react";
 import { useAuth } from "../auth.jsx";
 
 export default function Navbar() {
@@ -11,13 +12,12 @@ export default function Navbar() {
       <div className="container">
         <Link to="/" className="logo">
           <span className="logo-mark" aria-hidden="true" />
-          Tulsa Web Solution
+          <span>Tulsa Web Solution</span>
         </Link>
         <nav className="nav-links" aria-label="Main">
           <NavLink to="/" end>Find jobs</NavLink>
           {user?.role === "applicant" && <NavLink to="/applications">My applications</NavLink>}
           {user?.role === "hirer" && <NavLink to="/hirer">My jobs</NavLink>}
-          {user && <NavLink to="/profile">Profile</NavLink>}
         </nav>
         <div className="nav-user">
           {user ? (
@@ -26,6 +26,9 @@ export default function Navbar() {
                 <Link to="/hirer/jobs/new" className="btn btn-primary btn-sm">Post a job</Link>
               )}
               <span className="avatar" title={user.email}>{initials}</span>
+              <NavLink to="/profile" className="btn btn-outline btn-sm btn-icon" aria-label="Profile" title="Profile">
+                <UserRound size={18} aria-hidden="true" />
+              </NavLink>
               <button
                 className="btn btn-outline btn-sm"
                 onClick={() => {

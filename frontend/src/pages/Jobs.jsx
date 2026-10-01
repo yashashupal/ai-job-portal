@@ -66,6 +66,10 @@ export default function Jobs() {
   if (forYou && data.summary) marketMessage = data.summary;
   const showEmpty = !status.loading && data.items.length === 0 && !status.error;
   const showResults = !status.loading && data.items.length > 0;
+  const suggestedSkill = data.items.find((job) => job.technologies?.length)?.technologies[0];
+  const searchPlaceholder = forYou && user?.role === "applicant"
+    ? [user.headline, suggestedSkill || data.items[0]?.title].filter(Boolean).join(" · ") || "Skills from your resume"
+    : "Role, skill, or keyword";
 
   return (
     <div className="container">
@@ -75,7 +79,7 @@ export default function Jobs() {
         <form className="searchbar" onSubmit={submit} role="search">
           <div className="cell">
             <label htmlFor="q">Role or keyword</label>
-            <input id="q" type="text" placeholder="e.g. Django developer" value={form.q}
+            <input id="q" type="text" placeholder={searchPlaceholder} value={form.q}
               onChange={(e) => setForm({ ...form, q: e.target.value })} />
           </div>
           <div className="cell">

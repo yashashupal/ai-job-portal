@@ -1,7 +1,9 @@
 from django.contrib.auth.password_validation import validate_password
+from django.utils import timezone
 from rest_framework import serializers
 
 from .models import User
+from .resumes import ResumeTextError, extract_resume_text
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -22,10 +24,11 @@ class UserSerializer(serializers.ModelSerializer):
 
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=8)
+    resume = serializers.FileField(write_only=True, required=False)
 
     class Meta:
         model = User
-        fields = ("email", "password", "first_name", "last_name", "role", "company_name", "headline")
+        fields = ("email", "password", "first_name", "last_name", "role", "company_name", "headline", "resume")
 
     def validate_email(self, value):
         value = value.lower().strip()
@@ -37,14 +40,40 @@ class RegisterSerializer(serializers.ModelSerializer):
         validate_password(value)
         return value
 
+    def validate_resume(self, file):
+        serializer = ResumeUploadSerializer(data={"resume": file})
+        serializer.is_valid(raise_exception=True)
+        return file
+
     def validate(self, attrs):
         if attrs.get("role") == User.Role.HIRER and not attrs.get("company_name", "").strip():
             raise serializers.ValidationError({"company_name": "Company name is required for hirers."})
+        resume = attrs.get("resume")
+        if attrs.get("role", User.Role.APPLICANT) == User.Role.APPLICANT and not resume:
+            raise serializers.ValidationError({"resume": "A resume is required to create an applicant account."})
+        if resume:
+            try:
+                attrs["_resume_text"] = extract_resume_text(resume.read(), resume.name)
+            except ResumeTextError as exc:
+                raise serializers.ValidationError({"resume": str(exc)}) from exc
+            finally:
+                resume.seek(0)
         return attrs
 
     def create(self, validated_data):
         password = validated_data.pop("password")
-        user = User(username=validated_data["email"], **validated_data)
+        resume = validated_data.pop("resume", None)
+        resume_text = validated_data.pop("_resume_text", "")
+        resume_data = resume.read() if resume else None
+        user = User(
+            username=validated_data["email"],
+            **validated_data,
+            resume_name=resume.name[:200] if resume else "",
+            resume_type=(resume.content_type or "application/octet-stream") if resume else "",
+            resume_data=resume_data,
+            resume_text=resume_text,
+            resume_uploaded_at=timezone.now() if resume else None,
+        )
         user.set_password(password)
         user.save()
         return user

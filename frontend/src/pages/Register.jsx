@@ -8,6 +8,7 @@ export default function Register() {
   const navigate = useNavigate();
   const [role, setRole] = useState("applicant");
   const [form, setForm] = useState({ first_name: "", last_name: "", email: "", password: "", company_name: "", headline: "" });
+  const [resumeFile, setResumeFile] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
@@ -17,7 +18,10 @@ export default function Register() {
     setBusy(true);
     setError("");
     try {
-      const user = await register({ ...form, role });
+      const body = new FormData();
+      Object.entries({ ...form, role }).forEach(([key, value]) => body.append(key, value));
+      if (role === "applicant") body.append("resume", resumeFile);
+      const user = await register(body);
       navigate(user.role === "hirer" ? "/hirer/jobs/new" : "/", { replace: true });
     } catch (err) {
       setError(errorText(err));
@@ -29,7 +33,7 @@ export default function Register() {
     <div className="auth-wrap container">
       <form className="panel stack" onSubmit={submit}>
         <h2>Create your account</h2>
-        <div className="segmented" role="group" aria-label="Account type" style={{ display: "flex" }}>
+        <div className="segmented" aria-label="Account type" style={{ display: "flex" }}>
           <button type="button" style={{ flex: 1 }} aria-pressed={role === "applicant"} onClick={() => setRole("applicant")}>I want a job</button>
           <button type="button" style={{ flex: 1 }} aria-pressed={role === "hirer"} onClick={() => setRole("hirer")}>I'm hiring</button>
         </div>
@@ -41,8 +45,16 @@ export default function Register() {
         {role === "hirer" ? (
           <div><label htmlFor="co">Company name</label><input id="co" type="text" required value={form.company_name} onChange={set("company_name")} /></div>
         ) : (
-          <div><label htmlFor="hl">Headline <span className="muted">(optional)</span></label>
-            <input id="hl" type="text" placeholder="e.g. Full-stack developer, 2 yrs" value={form.headline} onChange={set("headline")} /></div>
+          <>
+            <div><label htmlFor="hl">Headline <span className="muted">(optional)</span></label>
+              <input id="hl" type="text" placeholder="e.g. Full-stack developer, 2 yrs" value={form.headline} onChange={set("headline")} /></div>
+            <div>
+              <label htmlFor="resume">Resume <span className="muted">(required)</span></label>
+              <input id="resume" type="file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                required onChange={(e) => setResumeFile(e.target.files?.[0] || null)} />
+              <p className="hint">PDF or DOCX, up to 5 MB. Used to find relevant live jobs.</p>
+            </div>
+          </>
         )}
         <div><label htmlFor="em">Email</label><input id="em" type="email" required autoComplete="email" value={form.email} onChange={set("email")} /></div>
         <div>
@@ -50,7 +62,7 @@ export default function Register() {
           <input id="pw" type="password" required minLength={8} autoComplete="new-password" value={form.password} onChange={set("password")} />
           <p className="hint">At least 8 characters.</p>
         </div>
-        <button className="btn btn-primary btn-block" disabled={busy}>{busy ? "Creating account…" : "Create account"}</button>
+        <button type="submit" className="btn btn-primary btn-block" disabled={busy}>{busy ? "Creating account…" : "Create account"}</button>
         <p className="muted small">Already registered? <Link to="/login">Log in</Link></p>
       </form>
     </div>

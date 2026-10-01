@@ -5,6 +5,7 @@ from docx import Document
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.cache import cache
 from django.test import override_settings
+from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.test import APITestCase
 
 from accounts.models import User
@@ -12,8 +13,17 @@ from jobs.models import ExternalJobEmbedding
 
 
 def register(client, email, role, **extra):
+    include_resume = extra.pop("include_resume", role == "applicant")
     body = {"email": email, "password": "StrongPass123", "first_name": "Test", "role": role, **extra}
-    r = client.post("/api/auth/register/", body, format="json")
+    if include_resume:
+        document = Document()
+        document.add_paragraph("Python React full stack engineer with API, database, and production experience. " * 5)
+        buffer = BytesIO()
+        document.save(buffer)
+        body["resume"] = SimpleUploadedFile("resume.docx", buffer.getvalue(), content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        r = client.post("/api/auth/register/", body, format="multipart")
+    else:
+        r = client.post("/api/auth/register/", body, format="json")
     assert r.status_code == 201, r.content
     return r.data["access"]
 
@@ -85,6 +95,32 @@ class PortalFlowTests(APITestCase):
         self.auth(other)
         self.assertEqual(self.client.delete(f"/api/jobs/{job_id}/").status_code, 404)
         self.assertEqual(self.client.patch(f"/api/applications/{app_id}/", {"status": "hired"}, format="json").status_code, 404)
+
+
+class RegistrationResumeTests(APITestCase):
+    def test_applicant_registration_requires_and_saves_resume(self):
+        body = {"email": "new-applicant@example.com", "password": "StrongPass123", "first_name": "New", "role": "applicant"}
+        missing = self.client.post("/api/auth/register/", body, format="json")
+        self.assertEqual(missing.status_code, 400)
+        self.assertIn("resume", missing.data)
+
+        document = Document()
+        document.add_paragraph("Full stack engineer skilled in Python, React, PostgreSQL, and REST API development. " * 5)
+        buffer = BytesIO()
+        document.save(buffer)
+        body["resume"] = SimpleUploadedFile("new-resume.docx", buffer.getvalue(), content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        created = self.client.post("/api/auth/register/", body, format="multipart")
+        self.assertEqual(created.status_code, 201, created.content)
+        self.assertTrue(created.data["user"]["has_resume"])
+        applicant = User.objects.get(email="new-applicant@example.com")
+        self.assertIn("PostgreSQL", applicant.resume_text)
+
+    def test_hirer_registration_does_not_require_resume(self):
+        response = self.client.post("/api/auth/register/", {
+            "email": "new-hirer@example.com", "password": "StrongPass123", "first_name": "New",
+            "role": "hirer", "company_name": "Acme",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.content)
 
     def test_login(self):
         register(self.client, "a@b.com", "applicant")
@@ -228,7 +264,8 @@ class GeminiMatchingTests(APITestCase):
 
     @patch("jobs.views.jobspipe.search_jobs")
     def test_recommendations_do_not_consume_search_without_a_resume(self, search):
-        token = register(self.client, "no-resume@example.com", "applicant")
+        user = User.objects.create_user(username="no-resume@example.com", email="no-resume@example.com", password="StrongPass123")
+        token = str(RefreshToken.for_user(user).access_token)
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
         response = self.client.get("/api/external/jobs/recommended/")
         self.assertEqual(response.status_code, 400)
