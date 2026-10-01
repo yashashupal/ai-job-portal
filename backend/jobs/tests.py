@@ -269,6 +269,7 @@ class GeminiMatchingTests(APITestCase):
         cache.clear()
         client = MagicMock()
         client.models.generate_content.side_effect = ServerError(500, {"message": "private provider detail"})
+        client.interactions.create.side_effect = ServerError(503, {"message": "private fallback detail"})
         ranked = [{"id": "job-500", "title": "Engineer", "match_score": 80}]
         with self.assertLogs("jobs.gemini", level="WARNING") as captured, \
              patch("jobs.gemini.cache.set") as cache_set:
@@ -277,6 +278,7 @@ class GeminiMatchingTests(APITestCase):
         self.assertIn("type=ServerError, status=500", captured.output[0])
         self.assertNotIn("private provider detail", captured.output[0])
         self.assertNotIn("private resume content", captured.output[0])
+        self.assertNotIn("private fallback detail", " ".join(captured.output))
         self.assertIn("temporarily unavailable", result["summary"])
         cache_set.assert_not_called()
 
@@ -299,6 +301,27 @@ class GeminiMatchingTests(APITestCase):
             "gemini-3.8-flash", "gemini-3.5-flash",
         ])
         self.assertEqual(result["results"][0]["match_reason"], "Your React experience matches this role.")
+
+    @override_settings(GEMINI_TEXT_MODEL="gemini-3.8-flash", GEMINI_TEXT_FALLBACK_MODEL="gemini-3.5-flash")
+    def test_stateless_interactions_recover_match_explanation(self):
+        from jobs.gemini import _match_insights
+
+        cache.clear()
+        client = MagicMock()
+        client.models.generate_content.side_effect = [
+            ServerError(500, {"message": "temporary"}),
+            ServerError(503, {"message": "temporary"}),
+        ]
+        client.interactions.create.return_value.output_text = json.dumps({
+            "summary": "Your API experience aligns with this role.",
+            "matches": [{"external_id": "job-interaction", "reason": "Your Python API experience matches the requirements.", "gaps": ["Cloud experience is not listed."]}],
+        })
+
+        result = _match_insights(client, "Python API developer resume", [{"id": "job-interaction", "title": "Python API Developer", "match_score": 86}])
+
+        self.assertEqual(result["results"][0]["match_reason"], "Your Python API experience matches the requirements.")
+        self.assertEqual(result["results"][0]["match_gaps"], ["Cloud experience is not listed."])
+        self.assertFalse(client.interactions.create.call_args.kwargs["store"])
 
     @override_settings(GEMINI_API_KEY="test-key", GEMINI_EMBEDDING_MODEL="gemini-embedding-001", GEMINI_TEXT_MODEL="gemini-2.5-flash")
     @patch("jobs.gemini._client", return_value=object())

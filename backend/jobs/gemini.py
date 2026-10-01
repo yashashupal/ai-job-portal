@@ -13,10 +13,12 @@ from .models import ExternalJobEmbedding
 
 EMBEDDING_DIMENSIONS = 768
 JOB_TEXT_LIMIT = 4000
+GEMINI_REQUEST_TIMEOUT_MS = 15000
 logger = logging.getLogger(__name__)
 
 MATCH_RESPONSE_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
+    additional_properties=False,
     required=["summary", "matches"],
     properties={
         "summary": types.Schema(type=types.Type.STRING),
@@ -24,6 +26,7 @@ MATCH_RESPONSE_SCHEMA = types.Schema(
             type=types.Type.ARRAY,
             items=types.Schema(
                 type=types.Type.OBJECT,
+                additional_properties=False,
                 required=["external_id", "reason", "gaps"],
                 properties={
                     "external_id": types.Schema(type=types.Type.STRING),
@@ -47,7 +50,10 @@ class GeminiError(Exception):
 def _client():
     if not settings.GEMINI_API_KEY:
         raise GeminiError("Resume matching is not configured. Add GEMINI_API_KEY to the server environment.")
-    return genai.Client(api_key=settings.GEMINI_API_KEY)
+    return genai.Client(
+        api_key=settings.GEMINI_API_KEY,
+        http_options=types.HttpOptions(timeout=GEMINI_REQUEST_TIMEOUT_MS),
+    )
 
 
 def _embed(client, texts, task_type):
@@ -113,7 +119,7 @@ def _generate_match_notes(client, prompt):
                     max_output_tokens=1400,
                 ),
             )
-            return response
+            return response.text or ""
         except Exception as exc:
             status_code = getattr(exc, "code", None)
             logger.warning(
@@ -123,8 +129,48 @@ def _generate_match_notes(client, prompt):
                 status_code,
             )
             if index + 1 == len(models) or not isinstance(status_code, int) or status_code < 500:
-                return None
-    return None
+                break
+
+    try:
+        interaction = client.interactions.create(
+            model=settings.GEMINI_TEXT_MODEL,
+            input=prompt,
+            store=False,
+            timeout=GEMINI_REQUEST_TIMEOUT_MS,
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["summary", "matches"],
+                    "properties": {
+                        "summary": {"type": "string"},
+                        "matches": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["external_id", "reason", "gaps"],
+                                "properties": {
+                                    "external_id": {"type": "string"},
+                                    "reason": {"type": "string"},
+                                    "gaps": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        )
+        return interaction.output_text or ""
+    except Exception as exc:
+        logger.warning(
+            "Gemini stateless explanation fallback failed (type=%s, status=%s).",
+            type(exc).__name__,
+            getattr(exc, "code", None),
+        )
+        return None
 
 
 def _match_insights(client, resume_text, ranked):
@@ -153,11 +199,11 @@ def _match_insights(client, resume_text, ranked):
         "Keep each reason under 35 words and list at most 3 concrete missing requirements; use an empty gaps list when none are stated. "
         f"RESUME:\n{resume_text[:7000]}\nJOBS:\n{json.dumps(payload, ensure_ascii=True)}"
     )
-    response = _generate_match_notes(client, prompt)
+    raw = _generate_match_notes(client, prompt)
 
     generated = False
-    if response is not None:
-        raw = (response.text or "").strip()
+    if raw:
+        raw = raw.strip()
         if raw.startswith("```"):
             lines = raw.splitlines()
             if lines and lines[0].strip().lower() in ("```", "```json"):
