@@ -22,7 +22,7 @@ export default function Jobs() {
   const [form, setForm] = useState({ q: "", location: "" });
   const [applied, setApplied] = useState({ q: "", location: "" });
   const [filters, setFilters] = useState({ remote: false, country: "" });
-  const [forYou, setForYou] = useState(false);
+  const [forYou, setForYou] = useState(user?.role === "applicant");
   const [data, setData] = useState({ items: [], count: 0, hasNext: false, cursor: null, sandbox: false, summary: "" });
   const [status, setStatus] = useState({ loading: true, loadingMore: false, error: "" });
 
