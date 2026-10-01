@@ -1,3 +1,4 @@
+import json
 from io import BytesIO
 from unittest.mock import MagicMock, patch
 
@@ -238,6 +239,29 @@ class ExternalTrackingTests(APITestCase):
 
 
 class GeminiMatchingTests(APITestCase):
+    def test_gemini_explanations_are_schema_constrained_and_attached(self):
+        from jobs.gemini import MATCH_RESPONSE_SCHEMA, _match_insights
+
+        cache.clear()
+        job = {"id": "job-123", "title": "React Engineer", "match_score": 84, "technologies": ["React"]}
+        client = MagicMock()
+        client.models.generate_content.return_value.text = json.dumps({
+            "summary": "Your frontend experience aligns with this role.",
+            "matches": [{
+                "external_id": "job-123",
+                "reason": "Your resume lists React, which is required for this role.",
+                "gaps": ["No testing framework is listed."],
+            }],
+        })
+
+        result = _match_insights(client, "React engineer with five years of experience.", [job])
+
+        config = client.models.generate_content.call_args.kwargs["config"]
+        self.assertIs(config.response_schema, MATCH_RESPONSE_SCHEMA)
+        self.assertEqual(result["summary"], "Your frontend experience aligns with this role.")
+        self.assertEqual(result["results"][0]["match_reason"], "Your resume lists React, which is required for this role.")
+        self.assertEqual(result["results"][0]["match_gaps"], ["No testing framework is listed."])
+
     @override_settings(GEMINI_API_KEY="test-key", GEMINI_EMBEDDING_MODEL="gemini-embedding-001", GEMINI_TEXT_MODEL="gemini-2.5-flash")
     @patch("jobs.gemini._client", return_value=object())
     @patch("jobs.gemini._match_insights", side_effect=lambda client, resume, jobs: {"summary": "Matches ranked.", "results": jobs})

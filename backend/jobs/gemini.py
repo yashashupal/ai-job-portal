@@ -1,6 +1,7 @@
 """Resume-aware retrieval and grounded job-match explanations via Gemini."""
 import hashlib
 import json
+import logging
 import math
 
 from django.conf import settings
@@ -12,6 +13,31 @@ from .models import ExternalJobEmbedding
 
 EMBEDDING_DIMENSIONS = 768
 JOB_TEXT_LIMIT = 4000
+logger = logging.getLogger(__name__)
+
+MATCH_RESPONSE_SCHEMA = types.Schema(
+    type=types.Type.OBJECT,
+    required=["summary", "matches"],
+    properties={
+        "summary": types.Schema(type=types.Type.STRING),
+        "matches": types.Schema(
+            type=types.Type.ARRAY,
+            items=types.Schema(
+                type=types.Type.OBJECT,
+                required=["external_id", "reason", "gaps"],
+                properties={
+                    "external_id": types.Schema(type=types.Type.STRING),
+                    "reason": types.Schema(type=types.Type.STRING),
+                    "gaps": types.Schema(
+                        type=types.Type.ARRAY,
+                        items=types.Schema(type=types.Type.STRING),
+                        max_items=3,
+                    ),
+                },
+            ),
+        ),
+    },
+)
 
 
 class GeminiError(Exception):
@@ -106,10 +132,15 @@ def _match_insights(client, resume_text, ranked):
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                temperature=0.1,
+                response_schema=MATCH_RESPONSE_SCHEMA,
                 max_output_tokens=1400,
             ),
         )
+    except Exception as exc:
+        logger.warning("Gemini match-note request failed (%s).", type(exc).__name__)
+        response = None
+
+    if response is not None:
         raw = (response.text or "").strip()
         if raw.startswith("```"):
             lines = raw.splitlines()
@@ -118,20 +149,27 @@ def _match_insights(client, resume_text, ranked):
             if lines and lines[-1].strip() == "```":
                 lines = lines[:-1]
             raw = "\n".join(lines).strip()
-        parsed = json.loads(raw)
-        allowed_ids = {job["id"] for job in ranked}
-        insights = {
-            item["external_id"]: {
-                "reason": str(item.get("reason", ""))[:300],
-                "gaps": [str(gap)[:100] for gap in item.get("gaps", [])[:3]],
+        try:
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict) or not isinstance(parsed.get("matches"), list):
+                raise ValueError("Invalid match response shape")
+            allowed_ids = {job["id"] for job in ranked}
+            insights = {
+                item["external_id"]: {
+                    "reason": str(item.get("reason", ""))[:300],
+                    "gaps": [str(gap)[:100] for gap in item.get("gaps", [])[:3]],
+                }
+                for item in parsed["matches"]
+                if isinstance(item, dict) and item.get("external_id") in allowed_ids
             }
-            for item in parsed.get("matches", [])
-            if isinstance(item, dict) and item.get("external_id") in allowed_ids
-        }
-        summary = str(parsed.get("summary", ""))[:500]
-    except Exception:
+            summary = str(parsed.get("summary", ""))[:500]
+        except (json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
+            logger.warning("Gemini match-note response was invalid (%s).", type(exc).__name__)
+            insights = {}
+            summary = "Jobs are ranked by semantic similarity to your resume. Review each listing before applying."
+    else:
         insights = {}
-        summary = "Jobs are ranked by semantic similarity to your resume. Review each listing before applying."
+        summary = "Jobs are ranked by semantic similarity to your resume. AI explanations are temporarily unavailable."
 
     for job in ranked:
         fallback_reason, fallback_gaps = _fallback_insight(job, job["match_score"])
