@@ -38,7 +38,7 @@ export default function Login() {
           <input id="password" type="password" required autoComplete="current-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
         </div>
         <button className="btn btn-primary btn-block" disabled={busy}>{busy ? "Logging in…" : "Log in"}</button>
-        <p className="muted small">New to Hirelane? <Link to="/register">Create an account</Link></p>
+        <p className="muted small">New to Tulsa Web Solution? <Link to="/register">Create an account</Link></p>
       </form>
     </div>
   );

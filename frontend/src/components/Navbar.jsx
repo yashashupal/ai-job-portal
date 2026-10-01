@@ -11,7 +11,7 @@ export default function Navbar() {
       <div className="container">
         <Link to="/" className="logo">
           <span className="logo-mark" aria-hidden="true" />
-          Hirelane
+          Tulsa Web Solution
         </Link>
         <nav className="nav-links" aria-label="Main">
           <NavLink to="/" end>Find jobs</NavLink>

@@ -82,7 +82,7 @@ export default function Jobs() {
     <div className="container">
       <section className="hero">
         <h1>Find work worth applying for</h1>
-        <p>Browse roles posted directly on Hirelane, or search live openings collected from 30+ job boards.</p>
+        <p>Browse roles posted directly on Tulsa Web Solution, or search live openings collected from 30+ job boards.</p>
         <form className="searchbar" onSubmit={submit} role="search">
           <div className="cell">
             <label htmlFor="q">Role or keyword</label>
@@ -100,7 +100,7 @@ export default function Jobs() {
 
       <div className="row between wrap">
         <div className="segmented" role="group" aria-label="Job source">
-          <button aria-pressed={!live} onClick={() => switchTab("platform")}>On Hirelane</button>
+          <button aria-pressed={!live} onClick={() => switchTab("platform")}>On Tulsa Web Solution</button>
           <button aria-pressed={live} onClick={() => switchTab("live")}>Live market</button>
         </div>
         {!status.loading && !status.error && (
