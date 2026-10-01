@@ -234,3 +234,20 @@ class GeminiMatchingTests(APITestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("Upload your resume", response.data["detail"])
         search.assert_not_called()
+
+    def test_recommendations_search_by_headline_and_limit_initial_batch(self):
+        token = register(self.client, "headline@example.com", "applicant")
+        user = User.objects.get(email="headline@example.com")
+        user.headline = "Full stack developer"
+        user.resume_text = "React Python full stack developer experience." * 5
+        user.save(update_fields=("headline", "resume_text"))
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+        search_result = {"results": [], "next_cursor": None, "total": 0, "sandbox": False}
+        with override_settings(GEMINI_API_KEY="test-key"), \
+             patch("jobs.views.jobspipe.search_jobs", return_value=search_result) as search, \
+             patch("jobs.views.gemini.rank_external_jobs", return_value={"summary": "Ranked.", "results": []}):
+            response = self.client.get("/api/external/jobs/recommended/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(search.call_args.kwargs["q"], "Full stack developer")
+        self.assertEqual(search.call_args.kwargs["limit"], 10)

@@ -174,13 +174,14 @@ class RecommendedExternalJobsView(_ExternalView):
         if not settings.GEMINI_API_KEY:
             return Response({"detail": "Resume matching is not configured. Add GEMINI_API_KEY to the server environment."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         try:
+            query = params.get("q", "").strip()[:100] or request.user.headline.strip()[:100]
             jobs = jobspipe.search_jobs(
-                q=params.get("q", "").strip()[:100],
+                q=query,
                 location=params.get("location", "").strip()[:100],
                 country=params.get("country", "").strip()[:2],
                 remote=params.get("remote") in ("1", "true", "True"),
                 cursor=params.get("cursor", ""),
-                limit=params.get("limit", 20),
+                limit=params.get("limit", 10),
             )
             ranked = gemini.rank_external_jobs(request.user, jobs["results"])
         except jobspipe.JobsPipeError as exc:
